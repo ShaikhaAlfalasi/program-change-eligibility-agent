@@ -1,3 +1,4 @@
+
 from pathlib import Path
 import re
 import json
@@ -10,22 +11,51 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 
 
-def get_program_url(program_id):
+def normalize_program_name(name):
     """
-    Find the official UoS URL for a program ID
-    from the program catalog.
+    Normalize program names for comparison without
+    confusing different programs that share an ID.
+    """
+    name = re.sub(r"\s+", " ", str(name).strip())
+    name = name.casefold()
+
+    prefixes = (
+        "bachelor of science in ",
+        "bachelor of science ",
+        "bachelor of arts in ",
+        "bachelor of arts ",
+        "bachelor in ",
+    )
+
+    for prefix in prefixes:
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+
+    return name.strip()
+
+
+def get_program_url(program_id, program_name):
+    """
+    Find the official UoS URL by matching BOTH
+    the program ID and program name in the catalog.
+
+    Raises an error if there is not exactly one match.
     """
 
-    catalog = (
-        DATA_DIR / "bachelors_program_catalog.txt"
-    ).read_text(encoding="utf-8")
+    catalog_path = DATA_DIR / "bachelors_program_catalog.txt"
 
-    program_id = str(program_id)
+    catalog = catalog_path.read_text(encoding="utf-8")
+
+    program_id = str(program_id).strip()
+    target_name = normalize_program_name(program_name)
 
     blocks = re.split(
         r"(?=Program ID:\s*)",
         catalog
     )
+
+    matches = []
 
     for block in blocks:
 
@@ -33,12 +63,6 @@ def get_program_url(program_id):
             r"Program ID:\s*(\d+)",
             block
         )
-
-        if not id_match:
-            continue
-
-        if id_match.group(1) != program_id:
-            continue
 
         name_match = re.search(
             r"Program Name:\s*(.*)",
@@ -55,44 +79,60 @@ def get_program_url(program_id):
             block
         )
 
-        if not url_match:
-            raise ValueError(
-                f"Official URL not found for program {program_id}."
-            )
+        if not all((
+            id_match,
+            name_match,
+            url_match,
+        )):
+            continue
 
-        return {
-            "program_id": program_id,
-            "program_name": (
-                name_match.group(1).strip()
-                if name_match
-                else ""
-            ),
+        catalog_id = id_match.group(1)
+        catalog_name = name_match.group(1).strip()
+
+        if catalog_id != program_id:
+            continue
+
+        if normalize_program_name(catalog_name) != target_name:
+            continue
+
+        matches.append({
+            "program_id": catalog_id,
+            "program_name": catalog_name,
             "college": (
                 college_match.group(1).strip()
                 if college_match
                 else ""
             ),
             "official_url": url_match.group(1).strip(),
-        }
+        })
 
-    raise ValueError(
-        f"Program ID {program_id} was not found in the program catalog."
-    )
+    if len(matches) != 1:
+        raise ValueError(
+            f"Expected exactly one catalog entry for "
+            f"Program ID '{program_id}' and program name "
+            f"'{program_name}', but found {len(matches)}. "
+            f"Check data/bachelors_program_catalog.txt."
+        )
+
+    return matches[0]
 
 
-def get_program_webpage(program_url):
+def get_program_webpage(program_url, expected_program_name):
     """
     Ask Gemini to retrieve the official UoS webpage and
     extract its study-plan courses into structured data.
 
-    Gemini must preserve Course_IDs exactly as they appear
-    on the official webpage.
+    Reject the result if the returned program name does
+    not match the expected program.
     """
 
     prompt = f"""
 Open and read this official University of Sharjah webpage:
 
 {program_url}
+
+The expected program is:
+{expected_program_name}
 
 Your task is ONLY to extract the study plan/curriculum
 information from this webpage.
@@ -144,6 +184,9 @@ IMPORTANT COURSE ID RULES:
     involving a Course_ID, preserve what the webpage
     actually shows. Do not silently correct it.
 
+13. Verify that the webpage belongs to the expected
+    program before extracting its courses.
+
 Do not include explanations, markdown, or code fences.
 Return JSON only.
 """
@@ -157,7 +200,8 @@ Return JSON only.
 
     if not response_text:
         raise ValueError(
-            f"Gemini returned empty study-plan content for {program_url}."
+            f"Gemini returned empty study-plan content "
+            f"for {program_url}."
         )
 
     response_text = response_text.strip()
@@ -187,7 +231,29 @@ Return JSON only.
 
     if not isinstance(structured_plan, dict):
         raise ValueError(
-            f"Invalid study-plan structure returned for {program_url}."
+            f"Invalid study-plan structure returned "
+            f"for {program_url}."
+        )
+
+    returned_program_name = str(
+        structured_plan.get("program_name", "")
+    ).strip()
+
+    if not returned_program_name:
+        raise ValueError(
+            "Gemini did not identify the program name "
+            "on the official study-plan webpage."
+        )
+
+    if (
+        normalize_program_name(returned_program_name)
+        != normalize_program_name(expected_program_name)
+    ):
+        raise ValueError(
+            f"Program mismatch: expected "
+            f"'{expected_program_name}', but Gemini returned "
+            f"'{returned_program_name}'. "
+            "The study plan will not be used."
         )
 
     courses = structured_plan.get("courses")
@@ -213,14 +279,9 @@ Return JSON only.
             course.get("course_name", "")
         ).strip()
 
-        credit_hours = course.get(
-            "credit_hours"
-        )
+        credit_hours = course.get("credit_hours")
 
-        if not course_id:
-            continue
-
-        if not course_name:
+        if not course_id or not course_name:
             continue
 
         if credit_hours is None:
@@ -238,12 +299,15 @@ Return JSON only.
             "credit_hours": credit_hours,
         })
 
+    if not validated_courses:
+        raise ValueError(
+            f"No valid courses were extracted from "
+            f"the study plan at {program_url}."
+        )
+
     return {
         "url": program_url,
-        "program_name": structured_plan.get(
-            "program_name",
-            ""
-        ),
+        "program_name": returned_program_name,
         "courses": validated_courses,
     }
 
@@ -256,7 +320,7 @@ def build_evidence_package(request_id):
     This function does not determine eligibility.
     """
 
-    # 1. Retrieve the Program Change request
+    # 1. Retrieve the Program Change request.
     request_data = get_program_change_request(
         request_id
     )
@@ -272,43 +336,63 @@ def build_evidence_package(request_id):
         else request_data
     )
 
-    # 2. Identify the current and requested programs
-    #    from the database request.
+    # Supabase RPC may return the JSON object directly,
+    # or the response may contain the function name as
+    # its outer key.
+    if (
+        isinstance(request, dict)
+        and "get_program_change_request" in request
+    ):
+        request = request["get_program_change_request"]
+
+    if not isinstance(request, dict):
+        raise ValueError(
+            f"Unexpected request data returned for {request_id}."
+        )
+
+    if request.get("request_type") != "Program Change":
+        raise ValueError(
+            f"Request {request_id} is not a Program Change request."
+        )
+
+    # 2. Identify current and requested programs from
+    #    the database request.
     current_program = request["current_program"]
     requested_program = request["new_program"]
 
     requested_program_id = requested_program["program_id"]
+    requested_program_name = requested_program["program_name"]
 
-    # 3. Find the official UoS URL ONLY for the
-    #    requested program.
+    # 3. Resolve the official URL using BOTH program ID
+    #    and program name.
     requested_program_source = get_program_url(
-        requested_program_id
+        requested_program_id,
+        requested_program_name
     )
 
-    # 4. Retrieve and structure ONLY the requested
-    #    program's study plan.
+    # 4. Retrieve and validate the requested program's
+    #    official study plan.
     requested_program_page = get_program_webpage(
-        requested_program_source["official_url"]
+        requested_program_source["official_url"],
+        requested_program_source["program_name"]
     )
 
-    # 5. Load Program Change rules
+    # 5. Load Program Change rules.
     constraints = (
         DATA_DIR / "program_change_constraints.txt"
     ).read_text(encoding="utf-8")
 
-    # 6. Load university-wide courses
+    # 6. Load university-wide courses.
     university_courses = (
         DATA_DIR / "university_courses.txt"
     ).read_text(encoding="utf-8")
 
-    # 7. Build evidence package
+    # 7. Build the evidence package.
     evidence_package = {
         "request_id": request_id,
 
         "request": request,
 
-        # Current program information comes directly
-        # from the database request.
         "current_program": current_program,
 
         "requested_program": {

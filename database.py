@@ -1,3 +1,4 @@
+
 import os
 
 from dotenv import load_dotenv
@@ -8,26 +9,21 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError(
+        "SUPABASE_URL and SUPABASE_KEY must be set in your .env file."
+    )
+
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-def get_request_type(request_id):
-    response = (
-        supabase
-        .table("Request")
-        .select("Request_Type")
-        .eq("Request_ID", request_id)
-        .limit(1)
-        .execute()
-    )
-
-    if response is None or not response.data:
-        return None
-
-    return response.data[0]["Request_Type"]
-
-
 def get_program_change_request(request_id):
+    """
+    Retrieve Program Change request data through the
+    authorized Supabase RPC function.
+
+    This function does not query the Request table directly.
+    """
     response = (
         supabase
         .rpc(

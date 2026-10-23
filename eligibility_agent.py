@@ -1,7 +1,5 @@
-from database import (
-    get_request_type,
-    get_program_change_request,
-)
+
+from database import get_program_change_request
 from evidence import build_evidence_package
 from eligibility_checks import run_basic_checks
 from llm_client import generate_with_fallback
@@ -18,7 +16,6 @@ def extract_recommendation(report):
     """
     Extract the final recommendation from Gemini's report.
     """
-
     for line in reversed(report.splitlines()):
         line = line.strip()
 
@@ -34,7 +31,6 @@ def format_matched_courses(matched_courses):
     """
     Format the deterministically verified applicable courses.
     """
-
     if not matched_courses:
         return "None"
 
@@ -59,7 +55,6 @@ def build_assessment_prompt(
     Build the prompt used by Gemini to produce
     the final academic assessment report.
     """
-
     current_program = evidence["current_program"]
     requested_program = evidence["requested_program"]
 
@@ -323,31 +318,16 @@ def run_program_change_agent(request_id):
     Run the complete Program Change Eligibility Agent.
     """
 
-    request_type = get_request_type(request_id)
-
-    if request_type is None:
-        return {
-            "request_id": request_id,
-            "status": "NOT_FOUND",
-            "message": "The provided request ID was not found.",
-        }
-
-    if request_type != "Program Change":
-        return {
-            "request_id": request_id,
-            "status": "WRONG_REQUEST_TYPE",
-            "message": (
-                "The provided request ID is not a Program Change request."
-            ),
-        }
-
     request_data = get_program_change_request(request_id)
 
     if not request_data:
         return {
             "request_id": request_id,
             "status": "NOT_FOUND",
-            "message": "The provided Program Change request was not found.",
+            "message": (
+                "No Program Change request was found "
+                "for the provided request ID."
+            ),
         }
 
     request = (
